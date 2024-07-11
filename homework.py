@@ -6,7 +6,6 @@ from http import HTTPStatus
 from sys import stdout
 
 from telebot import TeleBot
-from telebot.apihelper import ApiException
 from dotenv import load_dotenv
 
 from exceptions import HomeworksNameNotFound, StatusError
@@ -29,14 +28,12 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-last_status = {}
-
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 _handler = logging.StreamHandler(stream=stdout)
 _handler.setLevel(logging.DEBUG)
-_format = logging.Formatter('%(asctime)s - %(name)s - '
+_format = logging.Formatter('%(asctime)s -(%(name)s)- '
                             '[%(levelname)s] -> %(message)s')
 _handler.setFormatter(_format)
 log.addHandler(_handler)
@@ -44,11 +41,14 @@ log.addHandler(_handler)
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
+    log.debug('Проверяем наличие необходимых переменных окружения.')
     tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
     for token in tokens:
         if token is None:
-            log.critical(f'Отсутствует переменная окружения: {token}')
+            log.critical(f'Отсутствует переменная окружения: {token} \n'
+                         'Программа принудительно остановленна')
             return False
+    log.debug('Переменные окружения найдены. Продолжаем загрузку....')
     return True
 
 
@@ -57,14 +57,15 @@ def send_message(bot, message):
     try:
         log.debug('Посылаем сообщеие пользователю: \n' + message)
         bot.send_message(TELEGRAM_CHAT_ID, message)
-    except ApiException as err:
-        log.error(f'Ошибка отправки сообщения: {err}', exc_info=True)
+    except Exception as err:
+        log.error(f'Произошла ошибка при отправке сообщения в Telegram: {err}')
     else:
-        log.debug('Сообщение пользователю отправлено.')
+        log.debug('Сообщение успешно отправлено.')
 
 
 def get_api_answer(timestamp=0):
     """Запрашиваем API Yandex Practicum."""
+    log.debug('Посылаем запрос к API Yandex.')
     payload = {'from_date': timestamp}
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
@@ -77,10 +78,13 @@ def get_api_answer(timestamp=0):
         message = f'Ошибка при запросе к API: {err}'
         log.error(message)
         raise Exception(message)
+    else:
+        log.debug('Ответ от API получен.')
 
 
 def check_response(response):
     """Проверяем список ответ API на соответствие документации."""
+    log.debug('Проверяем ответ API на соответствие критериям.')
     if not isinstance(response, dict):
         raise TypeError('Ответ API не является словарем')
 
@@ -94,6 +98,7 @@ def check_response(response):
             'Неверный формат данных в ответе API: '
             'ключ "homeworks" не является списком'
         )
+    log.debug('Ответ соответствует заданным параметрам.')
     return response['homeworks']
 
 
@@ -105,39 +110,39 @@ def parse_status(homework):
     status = homework.get('status')
     if not status or status not in HOMEWORK_VERDICTS:
         raise StatusError('Получен неизвестный статус.')
-    if last_status.get(homework_name) == status:
-        return None
     verdict = HOMEWORK_VERDICTS[status]
-    last_status[homework_name] = status
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
+    log.debug('Запускаем программу.')
     if not check_tokens():
         return
 
     # Создаем объект класса бота
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
+    last_error = ''
     while True:
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            for homework in homeworks:
-                homework_status = parse_status(homework)
-                if homework_status:
-                    message = homework_status
-                    log.debug(message)
-                    send_message(bot, message)
-                else:
-                    log.debug('Статус домашнего задания не изменился.')
-            timestamp = response.get('current_date', timestamp)
+            log.debug('Проверяем статус домашнего задания.')
+            if homeworks:
+                homework_status = parse_status(homeworks[0])
+                log.debug(homework_status)
+                send_message(bot, homework_status)
+                timestamp = response.get('current_date', timestamp)
+            else:
+                log.debug('Статус домашнего задания не изменился.')
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             log.error(message)
-            send_message(bot, message)
-        log.debug('Ожидаем следующей проверки.')
+            if message != last_error:
+                send_message(bot, message)
+                last_error = message
+        log.debug(f'Следующая проверка через {RETRY_PERIOD / 60} мин.')
         time.sleep(RETRY_PERIOD)
 
 
