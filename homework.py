@@ -73,13 +73,12 @@ def get_api_answer(timestamp=0):
             message = f'Ошибка {response.status_code}: {response.reason}'
             log.error(message)
             raise Exception(message)
+        log.debug('Ответ от API получен.')
         return response.json()
     except requests.exceptions.RequestException as err:
         message = f'Ошибка при запросе к API: {err}'
         log.error(message)
         raise Exception(message)
-    else:
-        log.debug('Ответ от API получен.')
 
 
 def check_response(response):
