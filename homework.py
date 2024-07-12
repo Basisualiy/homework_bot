@@ -1,3 +1,4 @@
+from json import JSONDecodeError
 import logging
 import os
 import requests
@@ -6,9 +7,13 @@ from http import HTTPStatus
 from sys import stdout
 
 from telebot import TeleBot
+from telebot.apihelper import ApiException
 from dotenv import load_dotenv
 
-from exceptions import HomeworksNameNotFound, StatusError
+from exceptions import (HomeworksNameNotFound,
+                        MessageSendError,
+                        StatusError,
+                        YandexApiError)
 
 load_dotenv()
 
@@ -18,6 +23,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_PERIOD = 600
+SECOND_IN_MONTH = 2592000
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -43,11 +49,12 @@ def check_tokens():
     """Проверяет доступность переменных окружения."""
     log.debug('Проверяем наличие необходимых переменных окружения.')
     tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    for token in tokens:
-        if token is None:
+    token_error = [token for token in tokens if token is None]
+    if token_error:
+        for token in token_error:
             log.critical(f'Отсутствует переменная окружения: {token} \n'
                          'Программа принудительно остановленна')
-            return False
+        return False
     log.debug('Переменные окружения найдены. Продолжаем загрузку....')
     return True
 
@@ -57,8 +64,9 @@ def send_message(bot, message):
     try:
         log.debug('Посылаем сообщеие пользователю: \n' + message)
         bot.send_message(TELEGRAM_CHAT_ID, message)
-    except Exception as err:
-        log.error(f'Произошла ошибка при отправке сообщения в Telegram: {err}')
+    except ApiException as err:
+        raise MessageSendError('Произошла ошибка при отправке '
+                               f'сообщения в Telegram: {err}')
     else:
         log.debug('Сообщение успешно отправлено.')
 
@@ -69,16 +77,18 @@ def get_api_answer(timestamp=0):
     payload = {'from_date': timestamp}
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
-        if response.status_code != HTTPStatus.OK:
-            message = f'Ошибка {response.status_code}: {response.reason}'
-            log.error(message)
-            raise Exception(message)
-        log.debug('Ответ от API получен.')
-        return response.json()
     except requests.exceptions.RequestException as err:
-        message = f'Ошибка при запросе к API: {err}'
-        log.error(message)
-        raise Exception(message)
+        raise YandexApiError(f'Ошибка при запросе к API: {err}')
+    else:
+        if response.status_code != HTTPStatus.OK:
+            raise YandexApiError(f'Ошибка {response.status_code}: '
+                                 f'{response.reason}')
+        log.debug('Ответ от API получен.')
+        try:
+            api_answer = response.json()
+        except JSONDecodeError:
+            raise JSONDecodeError('Ошибка декодирования Json.')
+        return api_answer
 
 
 def check_response(response):
@@ -121,7 +131,7 @@ def main():
 
     # Создаем объект класса бота
     bot = TeleBot(token=TELEGRAM_TOKEN)
-    timestamp = int(time.time())
+    timestamp = int(time.time()) - SECOND_IN_MONTH
     last_error = ''
     while True:
         try:
@@ -135,6 +145,8 @@ def main():
                 timestamp = response.get('current_date', timestamp)
             else:
                 log.debug('Статус домашнего задания не изменился.')
+        except MessageSendError as error:
+            log.error(error)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             log.error(message)
